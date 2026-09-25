@@ -69,7 +69,7 @@ class Ingredient(models.Model):
 class RecipeItem(models.Model):
     
     quantity_per_serving=models.IntegerField(null=False, blank=False)
-    dish=models.ForeignKey(Dish, on_delete=models.CASCADE, verbose_name='maxsulat', related_name='recipeitem')
+    dish=models.ForeignKey(Dish, on_delete=models.CASCADE, verbose_name='dish', related_name='recipeitem')
     ingredient=models.ForeignKey(Ingredient, on_delete=models.CASCADE, verbose_name='maxsulat', related_name='recipeitem')
     
 
@@ -132,7 +132,7 @@ class Reservation(models.Model):
     
     
     
-    client=models.ForeignKey(Client, on_delete=models.CASCADE,  verbose_name='rezerv qilgan klient', related_name='reservation')
+    client=models.ForeignKey(Client, null=True, blank=True,  on_delete=models.CASCADE,  verbose_name='rezerv qilgan klient', related_name='reservation')
     restaurant=models.ForeignKey(Restaurant, on_delete=models.CASCADE, verbose_name='rezerv qilingan restoran', related_name='reservation')
     table=models.ForeignKey(Table, on_delete=models.CASCADE,  verbose_name='rezerv qilingan stol', related_name='reservation')
     

@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:17-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_DB=rest_db
+      - POSTGRES_USER=rest_superuser
+      - POSTGRES_PASSWORD=asdasdasd123123123
+    ports:
+      - "5433:5432"
+
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/Course_project_ustudy
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    environment:
+      - DB_NAME=rest_db
+      - DB_USER=rest_superuser
+      - DB_PASSWORD=asdasdasd123123123
+      - DB_HOST=db
+      - DB_PORT=5432
+
+volumes:
+  postgres_data:

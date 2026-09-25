@@ -1,17 +1,17 @@
 
     
 from rest_framework import viewsets, generics, serializers, status
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError, NotFound
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken, TokenError
 from rest_framework.response import Response
 from django.utils import timezone
 from rest_framework.views import APIView
 from django.db import transaction
-from rest_framework.exceptions import NotFound
-
+from django.db.models import F
 from drf_spectacular.utils import extend_schema
 from rest_framework.permissions import IsAuthenticated, AllowAny
+
 from .models import Restaurant, User, Client, Category, Dish, Ingredient, RecipeItem, Table, Order, OrderItem, Reservation
 
 from .serializers import (StatusOrderSerializer,StockTransactionCreateSerializer, DishStatusSerializer, RestaurantSerializer, UserSerializer, ClientSerializer, 
@@ -109,27 +109,38 @@ class RestaurantListCreateView(RestaurantBaseView, generics.ListCreateAPIView):
 
 @extend_schema(tags=['Restaurant detail page (superuser can do anything, others only read)'])
 class RestaurantRetrieveUpdateDestroyView(RestaurantBaseView, generics.RetrieveUpdateDestroyAPIView):
-    pass
+    pass    
 
 
 @extend_schema(tags=['Users (restaurant-staff can only read, only admin and superadmin can create)'])      
 class UserListCreateView(generics.ListCreateAPIView):
     serializer_class = UserSerializer
     permission_classes = [PermissionUser, IsAuthenticated]
+
     def get_queryset(self):
         user = self.request.user  
+        queryset = User.objects.select_related('restaurant')
+
         if user.is_superuser:
-            return User.objects.all()
-        if hasattr(user, 'restaurant') and user.restaurant:
-            return User.objects.filter(restaurant=user.restaurant)
-        return User.objects.none() 
+            return queryset.all()
+
+        user_restaurant_id = getattr(user, 'restaurant_id', None)
+        if user_restaurant_id:
+            return queryset.filter(restaurant_id=user_restaurant_id)
+            
+        return User.objects.none()
 
     def perform_create(self, serializer):
-        if self.request.user.is_superuser:
+        user = self.request.user
+        
+        if user.is_superuser:
             serializer.save()
         else:
-            serializer.save(restaurant=self.request.user.restaurant)
-      
+            user_restaurant_id = getattr(user, 'restaurant_id', None)
+            if not user_restaurant_id:
+                raise serializers.ValidationError({"restaurant": "Admin restoranga biriktirilmegen"})
+            
+            serializer.save(restaurant_id=user_restaurant_id)
       
 
 
@@ -139,18 +150,18 @@ class UserRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [PermissionUser, IsAuthenticated]
     def get_queryset(self):
         user = self.request.user
+        queryset = User.objects.select_related('restaurant')
 
         if user.is_superuser:
-            return User.objects.all()
+            return queryset.all()
 
-        if hasattr(user, 'restaurant') and user.restaurant:
-       
+        if user.restaurant_id:
             if user.role == 'admin':
-                return User.objects.filter(restaurant=user.restaurant)
+                return queryset.filter(restaurant_id=user.restaurant_id)
             else:
-                return User.objects.filter(id=user.id)
+                return queryset.filter(id=user.id)
 
-        return User.objects.none()
+        return queryset.none()
 
 
 
@@ -171,16 +182,17 @@ class CategoryListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
             user = self.request.user
             restaurant_id = self.kwargs.get('pk')
-            if user.is_superuser or Client.objects.filter(user=user).exists():
-                    return Category.objects.filter(restaurant_id=restaurant_id)
+            queryset = Category.objects.select_related('restaurant')
             
-            if hasattr(user, 'restaurant') and user.restaurant:
-                    return Category.objects.filter(restaurant=user.restaurant)  
-            return Category.objects.none()   
-        
-    # def perform_create(self, serializer):
-    #     restaurant_pk = self.kwargs.get('pk')
-    #     serializer.save(restaurant_id=restaurant_pk)
+            is_client = hasattr(user, 'client') 
+
+            if user.is_superuser or is_client:
+                return queryset.filter(restaurant_id=restaurant_id)
+            
+            if user.restaurant_id:
+                return queryset.filter(restaurant_id=user.restaurant_id)  
+                
+            return queryset.none()
         
     def perform_create(self, serializer):
             user = self.request.user
@@ -192,8 +204,8 @@ class CategoryListCreateView(generics.ListCreateAPIView):
                 else:
                     serializer.save()
 
-            elif hasattr(user, 'restaurant') and user.restaurant:
-                serializer.save(restaurant=user.restaurant)
+            elif user.restaurant_id:
+                serializer.save(restaurant_id=user.restaurant_id)
 
             else:
                 raise PermissionDenied(
@@ -211,18 +223,15 @@ class DishListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         user = self.request.user                             
         restaurant_id = self.kwargs.get('pk')
+        queryset = Dish.objects.select_related('restaurant', 'category')
+        is_client = hasattr(user, 'client')
         
-        if user.is_superuser or Client.objects.filter(user=user).exists():
-            return Dish.objects.filter(restaurant_id=restaurant_id)
+        if user.is_superuser or is_client:
+            return queryset.filter(restaurant_id=restaurant_id)
         
-        if hasattr(user, 'restaurant') and user.restaurant:
-            return Dish.objects.filter(restaurant=user.restaurant)
-
-        return Dish.objects.none()   
-    
-    # def perform_create(self, serializer):
-    #     restaurant_pk = self.kwargs.get('pk')
-    #     serializer.save(restaurant_id=restaurant_pk)
+        if user.restaurant_id:
+            return queryset.filter(restaurant_id=user.restaurant_id)
+        return queryset.none() 
     
     def perform_create(self, serializer):
             user = self.request.user
@@ -234,8 +243,8 @@ class DishListCreateView(generics.ListCreateAPIView):
                 else:
                     serializer.save()
 
-            elif hasattr(user, 'restaurant') and user.restaurant:
-                serializer.save(restaurant=user.restaurant)
+            elif user.restaurant_id:
+                serializer.save(restaurant_id=user.restaurant_id)
 
             else:
                 raise PermissionDenied(
@@ -253,11 +262,15 @@ class DishStatusChangeView(generics.UpdateAPIView):
     
     def get_queryset(self):
         user = self.request.user
+        queryset = Dish.objects.select_related('restaurant')
         
-        if hasattr(user, 'restaurant') and user.restaurant:
-            return Dish.objects.filter(restaurant=user.restaurant)
+        if user.is_superuser:
+            return queryset
+        
+        if user.restaurant_id:
+            return queryset.filter(restaurant_id=user.restaurant_id)
             
-        return Dish.objects.none()
+        return queryset.none()
 
 
 
@@ -269,18 +282,21 @@ class IngredientListCreateView(generics.ListCreateAPIView):
     permission_classes=[PermissionIngredient,IsAuthenticated]
    
     def get_queryset(self):
-        user = self.request.user
-                                        
+        user = self.request.user    
+        restaurant_id = self.kwargs.get('pk')
+        queryset = Ingredient.objects.all()
+        
         if user.is_superuser:
-            return Ingredient.objects.all()
-       
-        if hasattr(user, 'restaurant') and user.restaurant:
-                return Ingredient.objects.filter(restaurant=user.restaurant)
-        return Ingredient.objects.none()   
+            if restaurant_id:
+                return queryset.filter(restaurant_id=restaurant_id) 
+            return queryset
+                 
+        if getattr(user, 'restaurant_id', None):
+            return queryset.filter(restaurant_id=user.restaurant_id)
+
+        return queryset.none()
     
-    # def perform_create(self, serializer):
-    #     restaurant_pk = self.kwargs.get('pk')
-    #     serializer.save(restaurant_id=restaurant_pk)
+    
 
     def perform_create(self, serializer):
             user = self.request.user
@@ -290,30 +306,34 @@ class IngredientListCreateView(generics.ListCreateAPIView):
                 if restaurant_pk:
                     serializer.save(restaurant_id=restaurant_pk)
                 else:
-                    serializer.save()
+                    raise serializers.ValidationError({'restaurant': 'ID resotandi URL da korsetin'})
 
-            elif hasattr(user, 'restaurant') and user.restaurant:
-                serializer.save(restaurant=user.restaurant)
+            elif getattr(user, 'restaurant_id', None):
+                serializer.save(restaurant_id=user.restaurant_id)
 
             else:
                 raise PermissionDenied(
-                    'Siz esh qaysi restoranga biriktirilmegensiz!'
+                    'Siz hesh qaysi restoranga biriktirilmegensiz!'
                 )
 
 
 
-@extend_schema(tags=['Igridients (only admin, storekeeper and superadmin can add, others only read)'])
+@extend_schema(tags=['Ingredients (only admin, storekeeper and superadmin can add, others only read)'])
 class IngredientAddView(generics.UpdateAPIView):
     serializer_class = StockTransactionCreateSerializer
-    permission_classes = [PermissionIngredient,IsAuthenticated]
+    permission_classes = [PermissionIngredient, IsAuthenticated]
    
     def get_queryset(self):
         user = self.request.user
-                                        
-        if hasattr(user, 'restaurant') and user.restaurant:
-            return Ingredient.objects.filter(restaurant=user.restaurant)
+        queryset = Ingredient.objects.all()  
+        
+        if user.is_superuser:
+            return queryset
+        
+        if getattr(user, 'restaurant_id', None):
+            return queryset.filter(restaurant_id=user.restaurant_id)
        
-        return Ingredient.objects.none()   
+        return queryset.none()
     
     @transaction.atomic  
     def perform_update(self, serializer):
@@ -321,54 +341,75 @@ class IngredientAddView(generics.UpdateAPIView):
         stock_transaction = serializer.save(ingredient=ingredient)
 
         if stock_transaction.type == 'kirim':
-            ingredient.current_stock += stock_transaction.quantity
+            Ingredient.objects.filter(pk=ingredient.pk).update(
+                current_stock=F('current_stock') + stock_transaction.quantity
+            )
         elif stock_transaction.type == 'shigim':
-            ingredient.current_stock -= stock_transaction.quantity
-
-        ingredient.save()
+            Ingredient.objects.filter(pk=ingredient.pk).update(
+                current_stock=F('current_stock') - stock_transaction.quantity
+            )
     
     
     
-@extend_schema(tags=['Tables (only admin, waiter and superadmin can create, others only read)'])    
-class TableListCreateView(generics.ListCreateAPIView, generics.UpdateAPIView):
-    serializer_class=TableSerializer
-    permission_classes=[PermissionTable, IsAuthenticated]
+@extend_schema(tags=['Tables (only admin, waiter and superadmin can create, others only read)'])
+class TableListCreateView(generics.ListCreateAPIView):
+    serializer_class = TableSerializer
+    permission_classes = [PermissionTable, IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-                                        
+        restaurant_pk = self.kwargs.get('pk')
+        queryset = Table.objects.all()
+
         if user.is_superuser:
-            return Table.objects.all()
-        if hasattr(user, 'restaurant') and user.restaurant:
-            return Table.objects.filter(restaurant=user.restaurant)
-        
-        if Client.objects.filter(user=user).exists():
-            return Table.objects.filter(status_is_free=True)
-                
+            if restaurant_pk:
+                return queryset.filter(restaurant_id=restaurant_pk)
+            return queryset
+
+        if getattr(user, 'restaurant_id', None):
+            return queryset.filter(restaurant_id=user.restaurant_id)
+
+        if hasattr(user, 'client'):
+            queryset = queryset.filter(status_is_free=True)
+            if restaurant_pk:
+                queryset = queryset.filter(restaurant_id=restaurant_pk)
+            return queryset
+
         return Table.objects.none()
 
-    # def perform_create(self, serializer):
-    #     restaurant_pk = self.kwargs.get('pk')
-    #     serializer.save(restaurant_id=restaurant_pk)
-
     def perform_create(self, serializer):
-            user = self.request.user
+        user = self.request.user
 
-            if user.is_superuser:
-                restaurant_pk = self.kwargs.get('pk')
-                if restaurant_pk:
-                    serializer.save(restaurant_id=restaurant_pk)
-                else:
-                    serializer.save()
+        if user.is_superuser:
+            restaurant_pk = self.kwargs.get('pk')
+            if not restaurant_pk:
+                raise serializers.ValidationError({'restaurant': 'Resotan ID URL de korsetilmegen'})
+            serializer.save(restaurant_id=restaurant_pk)
 
-            elif hasattr(user, 'restaurant') and user.restaurant:
-                serializer.save(restaurant=user.restaurant)
+        elif getattr(user, 'restaurant_id', None):
+            serializer.save(restaurant_id=user.restaurant_id)
 
-            else:
-                raise PermissionDenied(
-                    'Siz esh qaysi restoranga biriktirilmegensiz!'
-                )
+        else:
+            raise PermissionDenied('Siz hech qaysi restoranga biriktirilmagansiz!')
 
+
+
+@extend_schema(tags=['Tables (only admin, waiter and superadmin can update, delete, others only read)'])
+class TableDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = TableSerializer
+    permission_classes = [PermissionTable, IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = Table.objects.all()
+
+        if user.is_superuser:
+            return queryset
+
+        if getattr(user, 'restaurant_id', None):
+            return queryset.filter(restaurant_id=user.restaurant_id)
+
+        return Table.objects.none()
 
        
 
@@ -379,135 +420,133 @@ class OrderListCreateView (generics.ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-                                        
+        
+        queryset = Order.objects.all()
         if user.is_superuser:
-            return Order.objects.all()
-        if hasattr(user, 'restaurant') and user.restaurant:
-            return Order.objects.filter(table__restaurant=user.restaurant)
-        
-        if Client.objects.filter(user=user).exists():
-            return Order.objects.filter(client__user=user)
-        return Order.objects.none()   
+            return queryset
 
-    # def perform_create(self, serializer):
-    #     restaurant_pk = self.kwargs.get('pk')
-    #     serializer.save(restaurant_id=restaurant_pk)
+        if getattr(user, 'restaurant_id', None):
+            return queryset.filter(table__restaurant_id=user.restaurant_id)
 
-    # def perform_create(self, serializer):
-    #         user = self.request.user
+        if hasattr(user, 'client'):
+            return queryset.filter(client__user=user)
 
-    #         if user.is_superuser:
-    #             restaurant_pk = self.kwargs.get('pk')
-    #             if restaurant_pk:
-    #                 serializer.save(restaurant_id=restaurant_pk)
-    #             else:
-    #                 serializer.save()
+        return queryset.none()
 
-    #         elif hasattr(user, 'restaurant') and user.restaurant:
-    #             serializer.save(restaurant=user.restaurant)
-
-    #         else:
-    #             raise PermissionDenied(
-    #                 'Siz esh qaysi restoranga biriktirilmegensiz!'
-    #             )
 
         
         
-@extend_schema(tags=['Active order items (only admin, chef and superadmin can update, others only read)'])       
-class ActiveOrderItemView(generics.ListAPIView, generics.UpdateAPIView):
-    serializer_class=OrderItemSerializer
-    permission_classes=[PermissionActiveOrderItem, IsAuthenticated]
+@extend_schema(tags=['Active order items (only read)'])     
+class ActiveOrderItemListView(generics.ListAPIView):
+    serializer_class = OrderItemSerializer
+    permission_classes = [PermissionActiveOrderItem, IsAuthenticated]
 
     def get_queryset(self):
-        user = self.request.user                   
-        if user.is_superuser:
-            return OrderItem.objects.filter(status='active')
-        if hasattr(user, 'restaurant') and user.restaurant:
-            if user.role in ['chef', 'admin']:
-                return OrderItem.objects.filter(order__table__restaurant=user.restaurant, status='active')
-            if user.role=='waiter':
-                return OrderItem.objects.filter(order__table__restaurant=user.restaurant, order__waiter=user.id, status='active')
-        return OrderItem.objects.none()  
+        user = self.request.user
     
+        queryset = OrderItem.objects.filter(status='active').select_related(
+            'dish', 
+            'order__table'
+        )
+        if user.is_superuser:
+            return queryset
+        restaurant_id = getattr(user, 'restaurant_id', None)
+        if restaurant_id:
+            if getattr(user, 'role', None) in ['chef', 'admin']:
+                return queryset.filter(order__table__restaurant_id=restaurant_id)
+            
+            if getattr(user, 'role', None) == 'waiter':
+                return queryset.filter(
+                    order__table__restaurant_id=restaurant_id, 
+                    order__waiter_id=user.id
+                )
+
+        return OrderItem.objects.none()
+
+@extend_schema(tags=['Active order items (only admin, chef and superadmin can update, others only read)'])         
+class ActiveOrderItemUpdateView(generics.UpdateAPIView):
+    serializer_class = OrderItemSerializer
+    permission_classes = [PermissionActiveOrderItem, IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = OrderItem.objects.select_related('dish', 'order__table')
+
+        if user.is_superuser:
+            return queryset
+
+        restaurant_id = getattr(user, 'restaurant_id', None)
+        if restaurant_id and getattr(user, 'role', None) in ['chef', 'admin']:
+            return queryset.filter(order__table__restaurant_id=restaurant_id)
+
+        return OrderItem.objects.none()
+
 
 
 @extend_schema(tags=['Order status (only admin, superadmin can update, others only read)'])   
 class ChangeOrdersStatusView(generics.UpdateAPIView):
-    serializer_class=StatusOrderSerializer
-    permission_classes=[IsAuthenticated, PermissionChangeOrderStatus]
+    serializer_class = StatusOrderSerializer
+    permission_classes = [IsAuthenticated, PermissionChangeOrderStatus]
 
     def get_queryset(self):
-        user = self.request.user         
+        user = self.request.user 
+        
+        queryset = Order.objects.filter(status='active').select_related('table')
+
         if user.is_superuser:
-            return Order.objects.filter(status='active')
+            return queryset
+        
         if hasattr(user, 'restaurant') and user.restaurant:
-            return Order.objects.filter(table__restaurant=user.restaurant, status='active')
+            return queryset.filter(table__restaurant=user.restaurant)
+            
         return Order.objects.none()  
-    
+
     def perform_update(self, serializer):
-            new_status = serializer.validated_data.get('status')
+        new_status = serializer.validated_data.get('status')
 
-            if new_status == 'closed':
-                order = serializer.save(closed_at=timezone.now())
-            else:
-                order = serializer.save()
+        if new_status == 'closed':
+            order = serializer.save(closed_at=timezone.now())
+        else:
+            order = serializer.save()
 
-            if order.status == 'closed':
-                table = order.table
-                if table and not table.status_is_free:
-                    table.status_is_free = True
-                    table.save(update_fields=['status_is_free'])
+        if order.status == 'closed':
+            table = order.table 
+            if table and not table.status_is_free:
+                table.status_is_free = True
+                table.save(update_fields=['status_is_free'])
+                    
+                    
                     
                     
 @extend_schema(tags=['Order items (only admin, superadmin, waiter can create, others only read)'])  
 class OrderItemViewSet(generics.ListCreateAPIView):
-    queryset=OrderItem.objects.all()
-    serializer_class=OrderItemSerializer
-    permission_classes=[IsAuthenticated, PermissionOrder]
+    serializer_class = OrderItemSerializer
+    permission_classes = [IsAuthenticated, PermissionOrder]
     
     def get_queryset(self):
         user = self.request.user
         order_pk = self.kwargs.get('order_pk')
-        #restaurant_id = self.kwargs.get('pk')
+
+        base_qs = OrderItem.objects.select_related('dish', 'order')
 
         if user.is_superuser:
-            return OrderItem.objects.all()
+            return base_qs.all()
+            
         if hasattr(user, 'restaurant') and user.restaurant:
-            return OrderItem.objects.filter(order=order_pk)
-                
-        if Client.objects.filter(user=user).exists():
-            return OrderItem.objects.filter(order__client__user=user)
-        return OrderItem.objects.none()  
-    
+            return base_qs.filter(order_id=order_pk)
+            
+        return base_qs.filter(order__client__user=user, order_id=order_pk)
+
     def perform_create(self, serializer):
-        
         order_id = self.kwargs.get('order_pk')
-        try:
-            order = Order.objects.get(pk=order_id)
-        except Order.DoesNotExist:
+
+        if not Order.objects.filter(pk=order_id).exists():
             raise NotFound("Заказ не найден")
             
-        serializer.save(order=order)
+        serializer.save(order_id=order_id)
     
     
-    # def perform_create(self, serializer):
-    #         user = self.request.user
 
-    #         if user.is_superuser:
-    #             restaurant_pk = self.kwargs.get('pk')
-    #             if restaurant_pk:
-    #                 serializer.save(restaurant_id=restaurant_pk)
-    #             else:
-    #                 serializer.save()
-
-    #         elif hasattr(user, 'restaurant') and user.restaurant:
-    #             serializer.save(restaurant=user.restaurant)
-
-    #         else:
-    #             raise PermissionDenied(
-    #                 'Siz esh qaysi restoranga biriktirilmegensiz!'
-    #             ) 
-        
 
 
 
@@ -519,55 +558,64 @@ class RecipeItemViewSet(generics.ListCreateAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        
+        base_qs = RecipeItem.objects.select_related('dish', 'ingredient')
+
+        if user.is_superuser:
+            restaurant_pk = self.kwargs.get('pk')
+            if restaurant_pk:
+                return base_qs.filter(dish__restaurant_id=restaurant_pk)
+            return base_qs.all()
+
         if hasattr(user, 'restaurant') and user.restaurant:
-            return RecipeItem.objects.filter(dish__restaurant=user.restaurant)
+            return base_qs.filter(dish__restaurant=user.restaurant)
 
         restaurant_pk = self.kwargs.get('pk')
         if restaurant_pk:
-            return RecipeItem.objects.filter(dish__restaurant_id=restaurant_pk)
+            return base_qs.filter(dish__restaurant_id=restaurant_pk)
 
         return RecipeItem.objects.none()
 
     def perform_create(self, serializer):
         dish = serializer.validated_data.get('dish')
         ingredient = serializer.validated_data.get('ingredient')
-        if dish.restaurant != ingredient.restaurant:
-            raise ValidationError("Dish penen inridient bir restoranga tiyisli boliw kerek!")
+
+        if dish.restaurant_id != ingredient.restaurant_id:
+            raise ValidationError("Dish penen ingredient bir restoranga tiyisli boliw kerek!")
 
         serializer.save()
 
 
     
+
+
+
 @extend_schema(tags=['RecipeItem (only admin, superadmin, storekeeper can update, others only read)']) 
-class RecipeItemViewSet(generics.RetrieveUpdateAPIView):
+class RecipeItemUpdateViewSet(generics.RetrieveUpdateAPIView):
     serializer_class = RecipeItemSerializer
     permission_classes = [IsAuthenticated, PermissionRecipe]
+    lookup_url_kwarg = 'item_pk'
 
     def get_queryset(self):
         user = self.request.user
         restaurant_pk = self.kwargs.get('pk')
-        # item_id = self.kwargs.get('id')
-        
+        base_qs = RecipeItem.objects.select_related('dish', 'ingredient')
+        user_role = getattr(user, 'role', None)
 
-        if user.is_superuser or user.role in ['admin', 'storekeeper']:
-            return RecipeItem.objects.filter(dish__restaurant_id=restaurant_pk)
+        if user.is_superuser or user_role in ['admin', 'storekeeper']:
+            if restaurant_pk:
+                return base_qs.filter(dish__restaurant_id=restaurant_pk)
+                
+        user_restaurant_id = getattr(user, 'restaurant_id', None)
+        if user_restaurant_id:
+            return base_qs.filter(dish__restaurant_id=user_restaurant_id)
 
-        if hasattr(user, 'restaurant') and user.restaurant:
-            return RecipeItem.objects.filter(dish__restaurant=user.restaurant)
-
-        if getattr(user, 'role', None) == 'client':
-            return RecipeItem.objects.filter(dish__restaurant_id=restaurant_pk)
-
-        return RecipeItem.objects.none() 
-    
+        return RecipeItem.objects.none()
 
     
     
     
     
-    
-@extend_schema(tags=['Reservation (only admin, superadmin, clients can create, others only read)'])  
+@extend_schema(tags=['Reservation (only admin, superadmin, clients can create, others only read)'])   
 class ReservationListCreateView(generics.ListCreateAPIView):
     serializer_class = ReservationSerializer
     permission_classes = [IsAuthenticated, PermissionReservation]
@@ -575,37 +623,48 @@ class ReservationListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         user = self.request.user
         restaurant_pk = self.kwargs.get('pk')
+        base_qs = Reservation.objects.select_related('client', 'restaurant', 'table')
 
         if user.is_superuser:
             if restaurant_pk:
-                return Reservation.objects.filter(restaurant_id=restaurant_pk)
-            return Reservation.objects.all()
+                return base_qs.filter(restaurant_id=restaurant_pk)
+            return base_qs.all()
 
-        if user.role == 'client':
-            return Reservation.objects.filter(client=user.client)
+        user_role = getattr(user, 'role', None)
 
-        if user.role == 'admin':
-            if user.restaurant:
-                return Reservation.objects.filter(restaurant=user.restaurant)
-            return Reservation.objects.none()
+        if user_role == 'client':
+            return base_qs.filter(client__user_id=user.id)
 
-        return Reservation.objects.none()
+        if user_role == 'admin':
+            user_restaurant_id = getattr(user, 'restaurant_id', None)
+            if user_restaurant_id:
+                return base_qs.filter(restaurant_id=user_restaurant_id)
+            return base_qs.none()
+
+        return base_qs.none()
 
     def perform_create(self, serializer):
         user = self.request.user
         restaurant_pk = self.kwargs.get('pk')
+        user_role = getattr(user, 'role', None)
 
-        if user.role == 'client':
-            client = user.client
+        if user.is_superuser:
+            serializer.save()
+            return
+
+        if user_role == 'client':
+            client_id = getattr(user, 'client_id', None) or getattr(user.client, 'id', None)
+            
             if not restaurant_pk:
                 raise serializers.ValidationError({"restaurant": "ID restoran URL da korsetilmegen."})
-            serializer.save(restaurant_id=restaurant_pk, client=client)
+            
+            serializer.save(restaurant_id=restaurant_pk, client_id=client_id)
 
-        elif user.role == 'admin':
-            if not user.restaurant:
+        elif user_role == 'admin':
+            user_restaurant_id = getattr(user, 'restaurant_id', None)
+            if not user_restaurant_id:
                 raise serializers.ValidationError({"detail": "Bul admin restoranga biriktirilmegen."})
-            serializer.save(restaurant=user.restaurant)
-
+            serializer.save(restaurant_id=user_restaurant_id)
         else:
             raise serializers.ValidationError({"detail": "Sizde bron qiliwga huquq joq"})
                 
@@ -622,7 +681,22 @@ class ReservationListForClientView(generics.ListAPIView):
         if user.role=='client':  
             return Reservation.objects.filter(client__user=user)
         return Reservation.objects.none() 
-    
+
+@extend_schema(tags=['Reservation (List for clients)'])    
+class ReservationListForClientView(generics.ListAPIView):
+    serializer_class = ReservationSerializer
+    permission_classes = [IsAuthenticated, PermissionReservationForClient]
+
+    def get_queryset(self):
+        user = self.request.user                  
+        if getattr(user, 'role', None) == 'client':  
+            return Reservation.objects.select_related(
+                'client', 
+                'restaurant', 
+                'table'
+            ).filter(client__user_id=user.id)
+
+        return Reservation.objects.none()
     
 
 
@@ -630,27 +704,22 @@ class ReservationListForClientView(generics.ListAPIView):
 
 @extend_schema(tags=['ClientList']) 
 class ClientListView(generics.ListAPIView):
-    queryset=Client.objects.all()
-    serializer_class=ClientSerializer
-    permission_classes=[IsAuthenticated]
+    serializer_class = ClientSerializer
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
-            user1 = self.request.user
-            if user1.is_superuser:
-                return Client.objects.filter(user__role='client')
-            
-            if user1.restaurant:
-                 return Client.objects.filter(user__restaurant=user1.restaurant).distinct()
-            
-            if Client.objects.filter(user=user1).exists():
-                return Client.objects.filter(user=user1)
-                
-            return Client.objects.none() 
+        user1 = self.request.user
+        base_qs = Client.objects.select_related('user')
+
+        if user1.is_superuser:
+            return base_qs.filter(user__role='client')
         
+        user_restaurant_id = getattr(user1, 'restaurant_id', None)
+        if user_restaurant_id:
+            return base_qs.filter(user__restaurant_id=user_restaurant_id).distinct()
+        return base_qs.filter(user_id=user1.id)
         
-    # def perform_create(self, serializer):
-    #     restaurant_pk = self.kwargs.get('pk')
-    #     serializer.save(restaurant_id=restaurant_pk)
+
 
 
 

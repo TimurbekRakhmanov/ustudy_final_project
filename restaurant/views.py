@@ -11,12 +11,13 @@ from django.db import transaction
 from django.db.models import F
 from drf_spectacular.utils import extend_schema
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from django.contrib.auth import get_user_model
 
 from .models import Restaurant, User, Client, Category, Dish, Ingredient, RecipeItem, Table, Order, OrderItem, Reservation
 
 from .serializers import (StatusOrderSerializer,StockTransactionCreateSerializer, DishStatusSerializer, RestaurantSerializer, UserSerializer, ClientSerializer, 
                           CategorySerializer, DishSerializer, IngredientSerializer, RecipeItemSerializer, TableSerializer, 
-                          OrderItemSerializer, OrderSerializer, ReservationSerializer, ClientRegistrationSerializer, CustomTokenObtainPairSerializer)
+                          OrderItemSerializer, ActiveOrderItemSerializer, OrderSerializer, ReservationSerializer, ClientRegistrationSerializer, CustomTokenObtainPairSerializer)
 
 from .permissions import (PermissionRestaurat, PermissionUser, PermissionCategory, PermissionDish, PermissionDishStatus, 
                           PermissionIngredient, PermissionTable, PermissionOrder, PermissionActiveOrderItem, PermissionChangeOrderStatus, 
@@ -100,7 +101,6 @@ class RestaurantBaseView:
         return Restaurant.objects.none()
     
     
-
 @extend_schema(tags=['Restaurants (any user can get list, only superuser can create)'])
 class RestaurantListCreateView(RestaurantBaseView, generics.ListCreateAPIView):
     pass
@@ -112,7 +112,10 @@ class RestaurantRetrieveUpdateDestroyView(RestaurantBaseView, generics.RetrieveU
     pass    
 
 
-@extend_schema(tags=['Users (restaurant-staff can only read, only admin and superadmin can create)'])      
+
+
+User = get_user_model()
+@extend_schema(tags=['Users (restaurant-staff can only read, only admin and superadmin can create)'])
 class UserListCreateView(generics.ListCreateAPIView):
     serializer_class = UserSerializer
     permission_classes = [PermissionUser, IsAuthenticated]
@@ -141,7 +144,6 @@ class UserListCreateView(generics.ListCreateAPIView):
                 raise serializers.ValidationError({"restaurant": "Admin restoranga biriktirilmegen"})
             
             serializer.save(restaurant_id=user_restaurant_id)
-      
 
 
 @extend_schema(tags=['Users detail page (restaurant-staff can only read, admin and superuser can do anything)'])
@@ -414,14 +416,14 @@ class TableDetailView(generics.RetrieveUpdateDestroyAPIView):
        
 
 @extend_schema(tags=['Orders (only admin, waiter and superadmin can create, others only read)'])   
-class OrderListCreateView (generics.ListCreateAPIView): 
-    serializer_class=OrderSerializer
-    permission_classes=[PermissionOrder,IsAuthenticated]
+class OrderListCreateView(generics.ListCreateAPIView):
+    serializer_class = OrderSerializer
+    permission_classes = [PermissionOrder, IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-        
-        queryset = Order.objects.all()
+        queryset = Order.objects.select_related('table', 'waiter', 'client')
+
         if user.is_superuser:
             return queryset
 
@@ -431,14 +433,21 @@ class OrderListCreateView (generics.ListCreateAPIView):
         if hasattr(user, 'client'):
             return queryset.filter(client__user=user)
 
-        return queryset.none()
+        return Order.objects.none()
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if not user.is_superuser and not hasattr(user, 'client'):
+            serializer.save(waiter=user)
+        else:
+            serializer.save()
 
 
         
         
 @extend_schema(tags=['Active order items (only read)'])     
 class ActiveOrderItemListView(generics.ListAPIView):
-    serializer_class = OrderItemSerializer
+    serializer_class = ActiveOrderItemSerializer
     permission_classes = [PermissionActiveOrderItem, IsAuthenticated]
 
     def get_queryset(self):
@@ -465,7 +474,7 @@ class ActiveOrderItemListView(generics.ListAPIView):
 
 @extend_schema(tags=['Active order items (only admin, chef and superadmin can update, others only read)'])         
 class ActiveOrderItemUpdateView(generics.UpdateAPIView):
-    serializer_class = OrderItemSerializer
+    serializer_class = ActiveOrderItemSerializer
     permission_classes = [PermissionActiveOrderItem, IsAuthenticated]
 
     def get_queryset(self):
@@ -518,33 +527,54 @@ class ChangeOrdersStatusView(generics.UpdateAPIView):
                     
                     
                     
-@extend_schema(tags=['Order items (only admin, superadmin, waiter can create, others only read)'])  
+@extend_schema(tags=['Order items (only admin, superadmin, waiter can create, others only read)'])
 class OrderItemViewSet(generics.ListCreateAPIView):
     serializer_class = OrderItemSerializer
     permission_classes = [IsAuthenticated, PermissionOrder]
-    
+
     def get_queryset(self):
         user = self.request.user
         order_pk = self.kwargs.get('order_pk')
-
         base_qs = OrderItem.objects.select_related('dish', 'order')
 
         if user.is_superuser:
             return base_qs.all()
-            
+
         if hasattr(user, 'restaurant') and user.restaurant:
             return base_qs.filter(order_id=order_pk)
-            
+
         return base_qs.filter(order__client__user=user, order_id=order_pk)
 
     def perform_create(self, serializer):
         order_id = self.kwargs.get('order_pk')
-
         if not Order.objects.filter(pk=order_id).exists():
             raise NotFound("Заказ не найден")
-            
-        serializer.save(order_id=order_id)
+
+        dish = serializer.validated_data['dish']
+        quantity = serializer.validated_data['quantity']
+
+        with transaction.atomic():
+            recipe_items = RecipeItem.objects.filter(dish=dish).select_related('ingredient')
+
+            for recipe in recipe_items:
+                ingredient = recipe.ingredient
+                total_required = recipe.quantity_per_serving * quantity
+
+                if ingredient.current_stock < total_required:
+                    raise ValidationError({
+                        "detail": f"Ingridientler jeterli emes '{ingredient.name}'. "
+                                  f"Bizge keregi: {total_required} {ingredient.unit}, "
+                                  f"Kazir bari: {ingredient.current_stock} {ingredient.unit}."
+                    })
+
     
+            for recipe in recipe_items:
+                ingredient = recipe.ingredient
+                total_required = recipe.quantity_per_serving * quantity
+                ingredient.current_stock -= total_required
+                ingredient.save(update_fields=['current_stock'])
+
+            serializer.save(order_id=order_id)
     
 
 

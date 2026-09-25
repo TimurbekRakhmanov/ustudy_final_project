@@ -3,7 +3,6 @@ from .models import Client
 
 class PermissionRestaurat(permissions.BasePermission):
     def has_permission(self, request, view):
-        # Все запросы требуют авторизации
         if not request.user or not request.user.is_authenticated:
             return False
 

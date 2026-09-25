@@ -1,36 +1,52 @@
-# posts/serializers.py
+
 from rest_framework import serializers
-from .models import Restaurant, User, Client, Category, Dish, Ingredient, RecipeItem, Table, Order, OrderItem, Reservation, StockTransaction
+from .models import Order, OrderStatus, Restaurant, UserRole, User, Client, Category, Dish, Ingredient, RecipeItem, Table, Order, OrderItem, Reservation, StockTransaction
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import get_user_model
-
+from django.core.validators import MinValueValidator
 from django.utils import timezone
 from django.db import transaction
+
+
 
 class RestaurantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Restaurant
         fields = ('name', 'address', 'phone', 'is_active', 'logo')
         
-        
 
 User = get_user_model()
 class UserSerializer(serializers.ModelSerializer):
+    ALLOWED_API_ROLES = [
+        (UserRole.CHEF.value, UserRole.CHEF.label),
+        (UserRole.WAITER.value, UserRole.WAITER.label),
+        (UserRole.STOREKEEPER.value, UserRole.STOREKEEPER.label),
+    ]
+
     password = serializers.CharField(
         write_only=True, 
         required=True, 
         style={'input_type': 'password'}
     )
+    role = serializers.ChoiceField(choices=ALLOWED_API_ROLES)
 
     class Meta:
         model = User
         fields = ('id', 'username', 'password', 'role', 'phone', 'is_active', 'restaurant')
 
+    def validate_role(self, value):
+        valid_roles = [UserRole.CHEF.value, UserRole.WAITER.value, UserRole.STOREKEEPER.value]
+        if value not in valid_roles:
+            raise serializers.ValidationError(
+                "API araqali tek usi roledegi userlerdi jaratsa boladi : chef, waiter, storekeeper."
+            )
+        return value
+
     def create(self, validated_data):
         password = validated_data.pop('password', None)
         user = User(**validated_data)
         if password:
-            user.set_password(password) 
+            user.set_password(password)
         user.save()
         return user
 
@@ -39,10 +55,9 @@ class UserSerializer(serializers.ModelSerializer):
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         if password:
-            instance.set_password(password) 
+            instance.set_password(password)
         instance.save()
         return instance
-        
         
 class ClientRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
@@ -134,7 +149,6 @@ class RecipeItemSerializer(serializers.ModelSerializer):
 
         
 
-
 class StockTransaction(serializers.ModelSerializer):
     class Meta:
         model=Table
@@ -149,13 +163,13 @@ class TableSerializer(serializers.ModelSerializer):
 
 
 class OrderSerializer(serializers.ModelSerializer):
+    status = serializers.ChoiceField(choices=OrderStatus.choices, default=OrderStatus.ACTIVE)
     class Meta:
         model=Order
         # fields='__all__'
         fields=('payment_method', 'status', 'created_at', 'closed_at', 'waiter', 'client', 'table')
         
 
-        
         
 class StatusOrderSerializer(serializers.ModelSerializer):
     class Meta:
@@ -164,12 +178,18 @@ class StatusOrderSerializer(serializers.ModelSerializer):
         #read_only_fields = ['table', 'waiter', 'client']
         
         
-        
 class OrderItemSerializer(serializers.ModelSerializer):
+    quantity = serializers.IntegerField(validators=[MinValueValidator(1, message="Mugdari 0 den kop boliwi kerek")])
     class Meta:
         model=OrderItem
         fields=('dish','quantity', 'note', 'status', 'order')
         read_only_fields = ('order',)
+        
+class ActiveOrderItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model=OrderItem
+        fields=('dish','quantity', 'note', 'status', 'order')
+        read_only_fields = ('dish','quantity', 'note','order')
         
         
 class ReservationSerializer(serializers.ModelSerializer):

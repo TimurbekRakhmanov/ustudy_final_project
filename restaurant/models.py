@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
+from django.core.validators import MinValueValidator
 
 
 
@@ -15,14 +16,22 @@ class Restaurant(models.Model):
 
 
 
+class UserRole(models.TextChoices):
+    SUPERADMIN = 'superadmin', 'Superadmin'
+    ADMIN = 'admin', 'Admin'
+    CHEF = 'chef', 'Chef'
+    WAITER = 'waiter', 'Waiter'
+    STOREKEEPER = 'storekeeper', 'Storekeeper'
+    CLIENT = 'client', 'Client'
+
+
 class User(AbstractUser):
-    phone=models.CharField(max_length=12, null=False, blank=False, verbose_name='user_tel_nomeri')
-    role=models.CharField(max_length=20, null=False, blank=False, verbose_name='user_roli')
-    restaurant=models.ForeignKey(Restaurant, null=True, blank=True, on_delete=models.CASCADE, verbose_name='restoran', related_name='user')
-    
+    phone = models.CharField(max_length=12, null=False, blank=False, verbose_name='user_tel_nomeri')
+    role = models.CharField(max_length=20, choices=UserRole.choices, default=UserRole.CLIENT, verbose_name='user_roli')
+    restaurant = models.ForeignKey('Restaurant', null=True, blank=True, on_delete=models.CASCADE, verbose_name='restoran', related_name='users')
+
     def __str__(self):
-            return self.username
-        
+        return self.username
         
         
 class Client(models.Model):
@@ -57,20 +66,25 @@ class Dish(models.Model):
         
 
 class Ingredient(models.Model):
-    name=models.CharField(max_length=50, unique=True, null=False, blank=False, verbose_name='ingidient_ati')
-    unit=models.CharField(max_length=50, unique=False, null=False, blank=False, verbose_name='ingridient_olshemi')
-    current_stock=models.IntegerField(null=False, blank=False, verbose_name='skladtagi_qaldiq')
-    restaurant=models.ForeignKey(Restaurant, on_delete=models.CASCADE, verbose_name='restoran', related_name='ingredient')
-    
+    name = models.CharField(max_length=50, unique=False, null=False, blank=False, verbose_name='ingidient_ati')
+    unit = models.CharField(max_length=50, unique=False, null=False, blank=False, verbose_name='ingridient_olshemi')
+    current_stock = models.IntegerField(null=False, blank=False, verbose_name='skladtagi_qaldiq')
+    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, verbose_name='restoran', related_name='ingredients')
+
+    class Meta:
+        unique_together = ('name', 'restaurant')
+        verbose_name = 'Ingridient'
+        verbose_name_plural = 'Ingridientler'
+
     def __str__(self):
-            return self.name
+        return self.name
         
 
 class RecipeItem(models.Model):
     
     quantity_per_serving=models.IntegerField(null=False, blank=False)
-    dish=models.ForeignKey(Dish, on_delete=models.CASCADE, verbose_name='dish', related_name='recipeitem')
-    ingredient=models.ForeignKey(Ingredient, on_delete=models.CASCADE, verbose_name='maxsulat', related_name='recipeitem')
+    dish=models.ForeignKey(Dish, on_delete=models.CASCADE, verbose_name='dish', related_name='recipe_items')
+    ingredient=models.ForeignKey(Ingredient, on_delete=models.CASCADE, verbose_name='maxsulat', related_name='recipe_items')
     
 
 
@@ -100,22 +114,49 @@ class Table(models.Model):
     restaurant=models.ForeignKey(Restaurant, on_delete=models.CASCADE, verbose_name='restoran', related_name='table')
 
 
+class OrderStatus(models.TextChoices):
+    ACTIVE = 'active', 'Active'
+    PASSIVE = 'passive', 'Passive'
+    CLOSED = 'closed', 'Closed'
+
+
+class OrderPaymentMethod(models.TextChoices):
+    CASH = 'cash', 'Cash'
+    CARD = 'card', 'Card'
+
+
 class Order(models.Model):
-    status=models.CharField(max_length=20, null=False, blank=False, verbose_name='zakaz_statusi')
-    payment_method=models.CharField(max_length=20, null=False, blank=False, verbose_name='tolem_turi')
-    
+    status = models.CharField(
+        max_length=20,
+        choices=OrderStatus.choices,
+        default=OrderStatus.ACTIVE,
+        verbose_name='zakaz_statusi'
+    )
+    payment_method = models.CharField(
+        max_length=20,
+        choices=OrderPaymentMethod.choices,
+        default=OrderPaymentMethod.CASH,
+        verbose_name='tolem_turi'
+    )
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='jaratilgan_waqti')
     closed_at = models.DateTimeField(null=True, blank=True, verbose_name='jawilgan_waqti')
-    
-    table=models.ForeignKey(Table, on_delete=models.CASCADE,  verbose_name='stol', related_name='order')
-    waiter=models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='ofitsiant', related_name='order')
-    client=models.ForeignKey(Client, null=True, blank=True, on_delete=models.CASCADE, verbose_name='klient', related_name="order")
-    
+
+    table = models.ForeignKey('Table', on_delete=models.CASCADE, verbose_name='stol', related_name='orders')
+    waiter = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='ofitsiant', related_name='orders')
+    client = models.ForeignKey('Client', null=True, blank=True, on_delete=models.CASCADE, verbose_name='klient', related_name='orders')
+
     def __str__(self):
-            return f"Order #{self.id} - {self.status}"
+        return f"Order #{self.id} - {self.status}"
+
+
 
 class OrderItem(models.Model):
-    quantity=models.IntegerField(null=False, blank=False)
+    quantity = models.IntegerField(
+            null=False, 
+            blank=False, 
+            validators=[MinValueValidator(1, message="Porciya sani 1 den kem bolmawi kerek")]
+        )
     note=models.CharField(max_length=50, blank=True, null=True,  verbose_name='zakazga_itemga_qosimsha')
     status=models.CharField(max_length=50,  verbose_name='zakaz_item_statusi')
     
